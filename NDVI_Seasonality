@@ -1,0 +1,99 @@
+# Define your boundary
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+    .filterDate('2015-01-01', '2020-01-01')
+    .filterBounds(asset);
+
+var dependent = 'NDVI';
+var harmonics = 1; 
+
+var harmonicFrequencies = ee.List.sequence(1, harmonics);
+var cosNames = harmonicFrequencies.map(function(i) { return ee.String('cos_').cat(ee.Number(i).int()); });
+var sinNames = harmonicFrequencies.map(function(i) { return ee.String('sin_').cat(ee.Number(i).int()); });
+var independents = ee.List(['constant', 't']).cat(cosNames).cat(sinNames);
+
+var maskClouds = function(image) {
+  var score = ee.Algorithms.Landsat.simpleCloudScore(image).select('cloud');
+  return image.updateMask(score.lt(10));
+};
+
+var addNDVI = function(image) {
+  return image.addBands(image.normalizedDifference(['B5', 'B4']).rename('NDVI').float());
+};
+
+var addDependents = function(image) {
+  var years = image.date().difference('1970-01-01', 'year');
+  var timeRadians = ee.Image(years.multiply(2 * Math.PI)).rename('t');
+  return image.addBands(ee.Image(1).rename('constant')).addBands(timeRadians.float());
+};
+
+var addHarmonics = function(freqs) {
+  return function(image) {
+    var time = image.select('t');
+    var cosines = time.multiply(ee.Image.constant(freqs)).cos().rename(cosNames);
+    var sines = time.multiply(ee.Image.constant(freqs)).sin().rename(sinNames);
+    return image.addBands(cosines).addBands(sines);
+  };
+};
+
+
+var harmonicLandsat = landsatCollection
+  .map(maskClouds)
+  .map(addNDVI)
+  .map(addDependents)
+  .map(addHarmonics(harmonicFrequencies));
+
+
+var harmonicTrend = harmonicLandsat
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.linearRegression(independents.length(), 1));
+
+
+var harmonicTrendCoefficients = harmonicTrend.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+
+
+var fittedHarmonic = harmonicLandsat.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients)
+      .reduce('sum')
+      .rename('fitted')
+  );
+});
+
+
+var sin = harmonicTrendCoefficients.select('sin_1');
+var cos = harmonicTrendCoefficients.select('cos_1');
+var magnitude = cos.hypot(sin).multiply(5);
+var phase = sin.atan2(cos).unitScale(-Math.PI, Math.PI);
+var val = harmonicLandsat.select('NDVI').reduce('mean');
+var seasonality = ee.Image.cat(phase, magnitude, val).hsvToRgb().clip(asset);
+
+
+Map.centerObject(asset, 10);
+Map.addLayer(seasonality, {}, 'NDVI Seasonality');
+Map.addLayer(asset, {}, 'ROI');
+
+Export.image.toDrive({
+  image: harmonicTrendCoefficients.clip(asset),
+  description: "Harmonic_Trend_Coefficients",
+  folder: "GEE_Exports",
+  fileNamePrefix: "Harmonic_Trend",
+  region: asset.geometry(),
+  scale: 30,
+  maxPixels: 1e13,
+  crs: "EPSG:4326"
+});
+
+
+Export.image.toDrive({
+  image: seasonality,
+  description: "NDVI_Seasonality",
+  folder: "GEE_Exports",
+  fileNamePrefix: "NDVI_Seasonality",
+  region: asset.geometry(),
+  scale: 30,
+  maxPixels: 1e13,
+  crs: "EPSG:4326"
+}); explain this code
